@@ -7,7 +7,7 @@ import { startFake } from "./fake-openai.js";
 import { configFromEnv } from "../src/config.js";
 import { runLogin } from "../src/auth.js";
 import { TokenManager, NeedsSignin } from "../src/token.js";
-import { eligible, topOf, ModelPicker } from "../src/models.js";
+import { eligible, topOf, standardOf, ModelPicker } from "../src/models.js";
 import { createGateway } from "../src/server.js";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "gw-"));
@@ -148,6 +148,9 @@ test("models: a new frontier family is picked once newer; top tier follows; smal
   assert.equal(el[0].id, "gpt-7-nova");
   assert.equal(topOf(el, cfg), "gpt-7-nova");
   assert.equal(topOf(eligible([...base, "gpt-6.2-astra"], cfg), cfg), "gpt-6.2-astra");
+  // the everyday pick stays on the Sol line even when the top tier is newer; a new family above Sol becomes top, not everyday
+  assert.equal(standardOf(eligible([...base, "gpt-6.2-astra"], cfg), cfg), "gpt-6.1-sol");
+  assert.equal(standardOf(el, cfg), "gpt-6.1-sol");
   assert.ok(!el.find((m) => /mini|codex|image|4o/.test(m.id)));
 });
 

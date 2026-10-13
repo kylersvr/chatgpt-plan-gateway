@@ -1,5 +1,5 @@
 // Always the newest eligible frontier model (rule 9.0d, wording of 2026-10-13: whatever the family is called). Ranks the account's model list by version, then tier.
-// "Newest" (current) = highest version among all frontier families. "Top" = newest of the highest tier (today Astra); a new family released at a
+// "Newest" (current) = newest everyday model (Sol line today), never the top tier by default. "Top" = newest of the highest tier (today Astra); a new family released at a
 // version above every known top-tier model also becomes top. Small, specialised and non-chat models are never picked.
 import { readJson, writeJsonAtomic } from "./store.js";
 
@@ -38,6 +38,14 @@ export function topOf(el, cfg) {
   const newer = el.find((e) => !e.known && (!known || cmpVersion(e.version, known.version) > 0));
   return (newer || known || el[0]).id;
 }
+// The everyday pick (Kyle, 2026-10-13: Sol by default, the top tier only when chosen): newest model that is not the top pick or a top-tier model.
+// If nothing else is left (the account lists only top-tier models), it is the newest eligible model.
+export function standardOf(el, cfg) {
+  if (!el.length) return null;
+  const topTier = cfg.tierOrder[cfg.tierOrder.length - 1];
+  const topId = topOf(el, cfg);
+  return (el.find((e) => e.id !== topId && e.tier !== topTier) || el[0]).id;
+}
 export function tierOf(id) { return parseModel(id)?.tier || null; }
 
 export class ModelPicker {
@@ -54,13 +62,13 @@ export class ModelPicker {
     const el = eligible(ids, this.cfg);
     if (!el.length) throw new Error("no frontier model in the account's model list");
     const previous = this.state.current;
-    const current = el[0].id;
+    const current = standardOf(el, this.cfg);
     const changed = previous !== current;
     const top = topOf(el, this.cfg);
     const next = { ...this.state, current, top, eligible: el.map((e) => e.id), checked_at: new Date(this.now()).toISOString() };
     if (changed) next.history = [...(this.state.history || []), { at: next.checked_at, from: previous, to: current }].slice(-50);
     this.state = next;
     writeJsonAtomic(this.cfg.modelsFile, next);
-    return { current, top, previous, changed, new_family: !el[0].known };
+    return { current, top, previous, changed, new_family: el.some((e) => !e.known) };
   }
 }
