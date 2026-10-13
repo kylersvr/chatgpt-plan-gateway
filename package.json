@@ -1,0 +1,10 @@
+{
+  "name": "chatgpt-plan-gateway",
+  "version": "0.1.0",
+  "description": "Small self-hosted gateway that lets your own tools use your ChatGPT plan through OpenAI's official 'Sign in with ChatGPT' flow. Holds no secrets in this repository.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "bin": { "chatgpt-plan-gateway": "bin/gateway.js", "chatgpt-plan-login": "bin/login.js" },
+  "scripts": { "test": "node --test test/*.test.js", "start": "node bin/gateway.js", "login": "node bin/login.js" }
+}

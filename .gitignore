@@ -1,0 +1,6 @@
+node_modules
+credentials*.json
+host.json
+models_state.json
+*.log
+.env
