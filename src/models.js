@@ -38,7 +38,7 @@ export class ModelPicker {
     const r = await this.fetchFn(this.cfg.apiBase + "/v1/models", { headers: { authorization: "Bearer " + accessToken, accept: "application/json" } });
     if (!r.ok) throw new Error("model list http " + r.status);
     const j = await r.json();
-    const ids = (j.data || j.models || []).map((m) => (typeof m === "string" ? m : m.id));
+    const ids = (j.data || j.models || []).map((m) => (typeof m === "string" ? m : m.id || m.slug)).filter(Boolean);
     const el = eligible(ids, this.cfg);
     if (!el.length) throw new Error("no Sol-or-better model in the account's model list");
     const previous = this.state.current;

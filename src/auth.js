@@ -57,12 +57,12 @@ export function credentialsFromTokenResponse(t, now = Date.now(), prev = {}) {
   };
 }
 
-export async function exchangeCode(cfg, { code, verifier, redirectUri }, fetchFn = fetch) {
+export async function exchangeCode(cfg, { code, verifier, redirectUri, clientId = CLIENT_ID }, fetchFn = fetch) {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
     redirect_uri: redirectUri,
-    client_id: CLIENT_ID,
+    client_id: clientId,
     code_verifier: verifier,
     resource: cfg.resource,
   });
@@ -98,15 +98,18 @@ export async function runLogin(cfg, { onUrl, fetchFn = fetch, timeoutMs = 5 * 60
       const code = u.searchParams.get("code");
       if (!code) throw new Error("no code in callback");
       const redirectUri = "http://127.0.0.1:" + server.address().port + "/auth/callback";
-      const t = await exchangeCode(cfg, { code, verifier, redirectUri }, fetchFn);
+      // OpenAI assigns a per-sign-in client id (oaiapp_...) and reports it on the callback; the exchange and every
+      // later refresh must use that one, not the placeholder used to start the sign-in.
+      const clientId = u.searchParams.get("client_id") || CLIENT_ID;
+      const t = await exchangeCode(cfg, { code, verifier, redirectUri, clientId }, fetchFn);
       let subject = null;
       if (t.id_token) {
         const jr = await fetchFn(meta.jwks_uri);
         const jwks = await jr.json();
-        const claims = await validateIdToken(t.id_token, { jwks, issuer: meta.issuer, audience: CLIENT_ID, nonce });
+        const claims = await validateIdToken(t.id_token, { jwks, issuer: meta.issuer, audience: clientId, nonce });
         subject = claims.sub;
       }
-      const creds = credentialsFromTokenResponse(t, Date.now(), { subject });
+      const creds = credentialsFromTokenResponse(t, Date.now(), { subject, client_id: clientId });
       creds.subject = subject;
       writeJsonAtomic(cfg.credFile, creds);
       page(200, "Signed in. You can close this tab.");
