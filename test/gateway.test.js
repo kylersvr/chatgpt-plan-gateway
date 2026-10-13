@@ -21,6 +21,7 @@ test("sign-in: PKCE and state checked, id_token validated, file is owner-only, n
   assert.equal(r.subject, "user-123");
   const auth = fake.st.calls.find((c) => c.path === "/api/accounts/authorize");
   assert.equal(auth.query.client_id, "dynamic_agent_client");
+  assert.equal(JSON.parse(fs.readFileSync(cfg.credFile, "utf8")).client_id, "oaiapp_test123"); // the per-sign-in id from the callback is kept for refreshes
   assert.equal(auth.query.code_challenge_method, "S256");
   assert.match(auth.query.ext_agent_host_id, /^urn:uuid:/);
   assert.equal(auth.query.agent_name_hint, "Build OS");
@@ -187,4 +188,49 @@ test("body over 1 MB is refused", async () => {
   const r = await t.call("/v1/responses", { input: "a".repeat(1100 * 1024) }).catch((e) => ({ status: 0, err: e }));
   assert.ok(r.status === 413 || r.status === 0);
   await t.down();
+});
+
+// ---- headless sign-in (start, then paste the return address) ----
+const browserLandsOn = async (url) => { const r = await fetch(url, { redirect: "manual" }); return r.headers.get("location"); }; // what a person copies from the error page
+
+test("headless sign-in: start gives an address, pasting the return address finishes it, models refresh", async () => {
+  const fake = await startFake(); const cfg = mkcfg(fake);
+  const gw = createGateway(cfg, fast); await gw.start();
+  const base = "http://127.0.0.1:" + gw.server.address().port;
+  const call = (p, body) => fetch(base + p, { method: body ? "POST" : "GET", headers: { "content-type": "application/json", authorization: "Bearer s3cret" }, body: body ? JSON.stringify(body) : undefined });
+  assert.equal((await (await call("/admin/signin/status")).json()).state, "idle");
+  const s = await (await call("/admin/signin/start", {})).json();
+  assert.match(s.url, /\/api\/accounts\/authorize\?/);
+  assert.equal((await (await call("/admin/signin/status")).json()).state, "waiting");
+  const again = await (await call("/admin/signin/start", {})).json();
+  assert.equal(again.url, s.url); assert.equal(again.reused, true);
+  const landing = await browserLandsOn(s.url);
+  const f = await call("/admin/signin/finish", { address: landing });
+  assert.equal(f.status, 200);
+  assert.equal((await (await call("/admin/signin/status")).json()).state, "signed_in");
+  assert.ok(fs.existsSync(cfg.credFile));
+  assert.equal(JSON.parse(fs.readFileSync(cfg.credFile, "utf8")).client_id, "oaiapp_test123");
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(gw.picker.current(), "gpt-6.1-sol"); // models picked right after sign-in
+  await gw.stop(); await fake.close();
+});
+
+test("headless sign-in: wrong address and finishing without starting are refused, nothing saved", async () => {
+  const fake = await startFake(); const cfg = mkcfg(fake);
+  const gw = createGateway(cfg, fast); await gw.start();
+  const base = "http://127.0.0.1:" + gw.server.address().port;
+  const call = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer s3cret" }, body: JSON.stringify(body) });
+  assert.equal((await call("/admin/signin/finish", { address: "http://127.0.0.1:1/auth/callback?code=x" })).status, 409);
+  const s = await (await call("/admin/signin/start", {})).json();
+  assert.equal((await call("/admin/signin/finish", { address: "not a url" })).status, 400);
+  assert.equal((await call("/admin/signin/finish", { address: "http://127.0.0.1:1/auth/callback?code=x&state=y" })).status, 400); // wrong port
+  assert.equal((await call("/admin/signin/finish", { address: "https://evil.example/auth/callback?code=x" })).status, 400);
+  const landing = await browserLandsOn(s.url);
+  const forged = new URL(landing); forged.searchParams.set("state", "forged");
+  const r = await call("/admin/signin/finish", { address: forged.toString() });
+  assert.equal(r.status, 400); assert.equal(fs.existsSync(cfg.credFile), false);
+  const st = await (await fetch(base + "/admin/signin/status", { headers: { authorization: "Bearer s3cret" } })).json();
+  assert.equal(st.state, "failed"); // a failed attempt can be started again
+  assert.equal((await call("/admin/signin/start", {})).status, 200);
+  await gw.stop(); await fake.close();
 });
