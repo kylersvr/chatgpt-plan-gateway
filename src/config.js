@@ -1,5 +1,6 @@
 // Configuration. Nothing secret lives in this repository: tokens go to a protected file the operator controls.
 import os from "node:os";
+import fs from "node:fs";
 import path from "node:path";
 
 export const DEFAULTS = {
@@ -32,7 +33,7 @@ export function configFromEnv(env = process.env) {
     credFile: path.join(dir, "credentials.json"),
     hostFile: path.join(dir, "host.json"),
     modelsFile: path.join(dir, "models_state.json"),
-    secret: env.GATEWAY_SECRET || "",
+    secret: env.GATEWAY_SECRET || (env.GATEWAY_SECRET_FILE ? fs.readFileSync(env.GATEWAY_SECRET_FILE, "utf8").trim() : ""),
     host: env.GATEWAY_HOST || "127.0.0.1",
     port: Number(env.GATEWAY_PORT || 8787),
     loginPort: Number(env.GATEWAY_LOGIN_PORT || 0),

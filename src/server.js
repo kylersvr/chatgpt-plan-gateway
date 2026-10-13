@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { TokenManager, NeedsSignin } from "./token.js";
 import { ModelPicker } from "./models.js";
 import { respond, GatewayError } from "./proxy.js";
+import { SigninManager, SigninError } from "./signin.js";
 
 const MAX_BODY = 1024 * 1024;
 const sha = (s) => crypto.createHash("sha256").update(String(s)).digest();
@@ -14,6 +15,7 @@ export function createGateway(cfg, { fetchFn = fetch, now, sleep } = {}) {
   const tokens = new TokenManager(cfg, { fetchFn, now, sleep });
   const picker = new ModelPicker(cfg, { fetchFn, now });
   const ctx = { cfg, tokens, picker, fetchFn };
+  const signin = new SigninManager(cfg, { fetchFn, onSignedIn: () => { refreshModels().catch(() => {}); } });
 
   const send = (res, status, obj) => { const b = JSON.stringify(obj); res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(b); };
   const authed = (req) => !cfg.secret || crypto.timingSafeEqual(sha(req.headers.authorization || ""), sha("Bearer " + cfg.secret));
@@ -25,6 +27,7 @@ export function createGateway(cfg, { fetchFn = fetch, now, sleep } = {}) {
   });
   const fail = (res, e) => {
     if (e instanceof NeedsSignin) return send(res, 401, { error: { code: "needs_signin", message: e.message } });
+    if (e instanceof SigninError) return send(res, e.status, { error: { code: e.code, message: e.message } });
     if (e instanceof GatewayError) return send(res, e.status, { error: { code: e.code, message: e.message, ...e.extra } });
     return send(res, 500, { error: { code: "internal", message: "gateway error" } });
   };
@@ -44,6 +47,10 @@ export function createGateway(cfg, { fetchFn = fetch, now, sleep } = {}) {
       if (!authed(req)) return send(res, 401, { error: { code: "unauthorized" } });
       if (req.method === "GET" && url.pathname === "/v1/models") return send(res, 200, { current: picker.current(), eligible: picker.list() });
       if (req.method === "POST" && url.pathname === "/v1/models/refresh") { try { return send(res, 200, await refreshModels()); } catch (e) { return fail(res, e); } }
+      if (req.method === "GET" && url.pathname === "/admin/signin/status") return send(res, 200, signin.status());
+      if (req.method === "POST" && url.pathname === "/admin/signin/start") return send(res, 200, await signin.start());
+      if (req.method === "POST" && url.pathname === "/admin/signin/cancel") { signin.cancel(); return send(res, 200, { ok: true }); }
+      if (req.method === "POST" && url.pathname === "/admin/signin/finish") { const b = await readBody(req); return send(res, 200, await signin.finish(b.address)); }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         const body = await readBody(req);
         const r = await respond(ctx, body);
@@ -55,7 +62,7 @@ export function createGateway(cfg, { fetchFn = fetch, now, sleep } = {}) {
 
   let modelTimer = null;
   return {
-    server, tokens, picker, refreshModels,
+    server, tokens, picker, signin, refreshModels,
     async start() {
       await new Promise((r) => server.listen(cfg.port, cfg.host, r));
       tokens.startTimer();
@@ -63,6 +70,6 @@ export function createGateway(cfg, { fetchFn = fetch, now, sleep } = {}) {
       modelTimer = setInterval(() => refreshModels().catch(() => {}), cfg.modelsEveryMs); modelTimer.unref?.();
       return server.address();
     },
-    async stop() { tokens.stop(); if (modelTimer) clearInterval(modelTimer); server.closeAllConnections?.(); await new Promise((r) => server.close(r)); },
+    async stop() { signin.cancel(); tokens.stop(); if (modelTimer) clearInterval(modelTimer); server.closeAllConnections?.(); await new Promise((r) => server.close(r)); },
   };
 }
