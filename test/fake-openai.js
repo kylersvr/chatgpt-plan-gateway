@@ -40,14 +40,14 @@ export async function startFake(opts = {}) {
       const q = u.searchParams;
       const code = "code-" + crypto.randomBytes(4).toString("hex");
       st.codes.set(code, { challenge: q.get("code_challenge"), nonce: q.get("nonce"), clientId: q.get("client_id"), redirect: q.get("redirect_uri") });
-      const to = new URL(q.get("redirect_uri")); to.searchParams.set("code", code); to.searchParams.set("state", q.get("state"));
+      const to = new URL(q.get("redirect_uri")); to.searchParams.set("code", code); to.searchParams.set("state", q.get("state")); to.searchParams.set("client_id", "oaiapp_test123"); st.codes.get(code).clientId = "oaiapp_test123";
       res.writeHead(302, { location: to.toString() }); return res.end();
     }
     if (u.pathname === "/api/accounts/oauth/token") {
       const f = new URLSearchParams(raw);
       if (f.get("grant_type") === "authorization_code") {
         const c = st.codes.get(f.get("code"));
-        const ok = c && b64u(crypto.createHash("sha256").update(f.get("code_verifier") || "").digest()) === c.challenge && c.redirect === f.get("redirect_uri");
+        const ok = c && f.get("client_id") === c.clientId && b64u(crypto.createHash("sha256").update(f.get("code_verifier") || "").digest()) === c.challenge && c.redirect === f.get("redirect_uri");
         if (!ok) return json(res, 400, { error: "invalid_grant" });
         st.codes.delete(f.get("code"));
         return json(res, 200, issue(c.clientId, c.nonce));
