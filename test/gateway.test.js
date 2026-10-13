@@ -7,7 +7,7 @@ import { startFake } from "./fake-openai.js";
 import { configFromEnv } from "../src/config.js";
 import { runLogin } from "../src/auth.js";
 import { TokenManager, NeedsSignin } from "../src/token.js";
-import { eligible, ModelPicker } from "../src/models.js";
+import { eligible, topOf, standardOf, ModelPicker } from "../src/models.js";
 import { createGateway } from "../src/server.js";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "gw-"));
@@ -136,6 +136,22 @@ test("responses: preview rules enforced upstream, banned fields dropped and repo
   for (const k of ["temperature", "max_output_tokens", "previous_response_id", "background"]) assert.equal(up1[k], undefined);
   assert.equal(up1.reasoning.effort, "high");
   await t.down();
+});
+
+test("models: a new frontier family is picked once newer; top tier follows; small and non-chat models never", async () => {
+  const cfg = configFromEnv({ GATEWAY_DIR: tmp() });
+  const base = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-astra-mini", "gpt-7-nova-mini", "gpt-7-codex", "gpt-7-image", "gpt-4o"];
+  assert.equal(eligible(base, cfg)[0].id, "gpt-6.1-sol");
+  assert.equal(topOf(eligible(base, cfg), cfg), "gpt-6-astra");
+  const more = [...base, "gpt-7-nova", "gpt-6.2-astra"];
+  const el = eligible(more, cfg);
+  assert.equal(el[0].id, "gpt-7-nova");
+  assert.equal(topOf(el, cfg), "gpt-7-nova");
+  assert.equal(topOf(eligible([...base, "gpt-6.2-astra"], cfg), cfg), "gpt-6.2-astra");
+  // the everyday pick stays on the Sol line even when the top tier is newer; a new family above Sol becomes top, not everyday
+  assert.equal(standardOf(eligible([...base, "gpt-6.2-astra"], cfg), cfg), "gpt-6.1-sol");
+  assert.equal(standardOf(el, cfg), "gpt-6.1-sol");
+  assert.ok(!el.find((m) => /mini|codex|image|4o/.test(m.id)));
 });
 
 test("effort floor: fast and minimal refused, low refused for Sol, allowed for Astra, above-high needs approval, default medium", async () => {

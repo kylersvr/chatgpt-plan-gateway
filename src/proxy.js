@@ -12,15 +12,15 @@ export class GatewayError extends Error {
   constructor(status, code, message, extra = {}) { super(message); this.status = status; this.code = code; this.extra = extra; }
 }
 
-export function checkEffort(effort, model, cfg) {
+export function checkEffort(effort, model, cfg, topId = null) {
   if (effort === undefined) return "medium";
   if (BANNED_EFFORT.has(effort)) throw new GatewayError(400, "effort_not_allowed", `effort "${effort}" is not allowed (never fast; medium or high by default)`);
-  if (effort === "low" && tierOf(model) !== "astra") throw new GatewayError(400, "effort_not_allowed", 'effort "low" is only for top-tier models; use medium or high');
+  if (effort === "low" && !(model === topId || tierOf(model) === cfg.tierOrder[cfg.tierOrder.length - 1])) throw new GatewayError(400, "effort_not_allowed", 'effort "low" is only for top-tier models; use medium or high');
   if (ABOVE_HIGH.has(effort) && !cfg.allowAboveHigh) throw new GatewayError(400, "effort_needs_approval", `effort "${effort}" is above High and needs Kyle's approval for this task`);
   return effort;
 }
 
-function sanitize(body, cfg, model) {
+function sanitize(body, cfg, model, topId = null) {
   const dropped = [];
   const out = {};
   for (const k of Object.keys(body)) {
@@ -30,7 +30,7 @@ function sanitize(body, cfg, model) {
   if (out.input === undefined) throw new GatewayError(400, "bad_request", "input is required");
   // The plan route only accepts input as a list of message items; wrap plain text for callers.
   if (typeof out.input === "string") out.input = [{ role: "user", content: [{ type: "input_text", text: out.input }] }];
-  const effort = checkEffort(out.reasoning?.effort, model, cfg);
+  const effort = checkEffort(out.reasoning?.effort, model, cfg, topId);
   out.reasoning = { ...(out.reasoning || {}), effort };
   out.model = model;
   out.store = false;
@@ -96,9 +96,9 @@ async function callOnce(ctx, token, payload) {
 
 export async function respond(ctx, body) {
   const { cfg, tokens, picker } = ctx;
-  const model = body.model && body.model !== "auto" ? body.model : picker.current();
+  const model = body.model === "auto-top" ? picker.top() : body.model && body.model !== "auto" ? body.model : picker.current();
   if (!model) throw new GatewayError(503, "no_model", "no model picked yet; the daily model check has not run");
-  const { out, dropped, effort } = sanitize(body, cfg, model);
+  const { out, dropped, effort } = sanitize(body, cfg, model, picker.top());
   const notes = { model, plan_lane: true, effort_requested: effort, effort_applied: true, web_search_applied: !!(out.tools || []).some((t) => /web_search/.test(t.type || "")), retries: [], dropped };
 
   let token = await tokens.getAccessToken();
