@@ -28,6 +28,8 @@ function sanitize(body, cfg, model) {
     if (ALLOWED.includes(k)) out[k] = body[k]; else dropped.push(k);
   }
   if (out.input === undefined) throw new GatewayError(400, "bad_request", "input is required");
+  // The plan route only accepts input as a list of message items; wrap plain text for callers.
+  if (typeof out.input === "string") out.input = [{ role: "user", content: [{ type: "input_text", text: out.input }] }];
   const effort = checkEffort(out.reasoning?.effort, model, cfg);
   out.reasoning = { ...(out.reasoning || {}), effort };
   out.model = model;
