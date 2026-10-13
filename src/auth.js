@@ -77,7 +77,7 @@ export async function exchangeCode(cfg, { code, verifier, redirectUri, clientId 
 }
 
 // Runs the whole sign-in. onUrl(url) receives the address Kyle (or the opener) must visit; nothing is printed here.
-export async function runLogin(cfg, { onUrl, fetchFn = fetch, timeoutMs = 5 * 60 * 1000, port = cfg.loginPort || 0 } = {}) {
+export async function runLogin(cfg, { onUrl, fetchFn = fetch, timeoutMs = 5 * 60 * 1000, port = cfg.loginPort || 0, signal } = {}) {
   const host = hostId(cfg.hostFile);
   const { verifier, challenge } = makePkce();
   const state = b64u(crypto.randomBytes(24));
@@ -122,6 +122,7 @@ export async function runLogin(cfg, { onUrl, fetchFn = fetch, timeoutMs = 5 * 60
   await new Promise((r) => server.listen(port, "127.0.0.1", r));
   const redirectUri = "http://127.0.0.1:" + server.address().port + "/auth/callback";
   const timer = setTimeout(() => done.rej(new Error("sign-in timed out")), timeoutMs);
+  if (signal) { if (signal.aborted) done.rej(new Error("sign-in cancelled")); else signal.addEventListener("abort", () => done.rej(new Error("sign-in cancelled")), { once: true }); }
   try {
     onUrl(authorizeUrl(cfg, { redirectUri, state, nonce, challenge, host }));
     return await result;
