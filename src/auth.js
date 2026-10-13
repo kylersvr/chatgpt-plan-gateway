@@ -77,7 +77,7 @@ export async function exchangeCode(cfg, { code, verifier, redirectUri, clientId 
 }
 
 // Runs the whole sign-in. onUrl(url) receives the address Kyle (or the opener) must visit; nothing is printed here.
-export async function runLogin(cfg, { onUrl, fetchFn = fetch, timeoutMs = 5 * 60 * 1000, port = cfg.loginPort || 0, signal } = {}) {
+export async function runLogin(cfg, { onUrl, fetchFn = fetch, timeoutMs = 30 * 60 * 1000, port = cfg.loginPort || 0, signal } = {}) {
   const host = hostId(cfg.hostFile);
   const { verifier, challenge } = makePkce();
   const state = b64u(crypto.randomBytes(24));
