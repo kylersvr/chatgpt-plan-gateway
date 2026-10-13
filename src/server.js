@@ -42,10 +42,10 @@ export function createGateway(cfg, { fetchFn = fetch, now, sleep } = {}) {
       const url = new URL(req.url, "http://x");
       if (req.method === "GET" && url.pathname === "/health") {
         if (!authed(req)) return send(res, 401, { error: { code: "unauthorized" } });
-        return send(res, 200, { ok: true, signin: tokens.status(), model: picker.current(), eligible: picker.list(), model_history: (picker.state.history || []).slice(-3) });
+        return send(res, 200, { ok: true, signin: tokens.status(), model: picker.current(), top: picker.top(), eligible: picker.list(), model_history: (picker.state.history || []).slice(-3) });
       }
       if (!authed(req)) return send(res, 401, { error: { code: "unauthorized" } });
-      if (req.method === "GET" && url.pathname === "/v1/models") return send(res, 200, { current: picker.current(), eligible: picker.list() });
+      if (req.method === "GET" && url.pathname === "/v1/models") return send(res, 200, { current: picker.current(), top: picker.top(), eligible: picker.list() });
       if (req.method === "POST" && url.pathname === "/v1/models/refresh") { try { return send(res, 200, await refreshModels()); } catch (e) { return fail(res, e); } }
       if (req.method === "GET" && url.pathname === "/admin/signin/status") return send(res, 200, signin.status());
       if (req.method === "POST" && url.pathname === "/admin/signin/start") return send(res, 200, await signin.start());
