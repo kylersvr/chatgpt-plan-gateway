@@ -29,7 +29,8 @@ export function createGateway(cfg, { fetchFn = fetch, now, sleep } = {}) {
     if (e instanceof NeedsSignin) return send(res, 401, { error: { code: "needs_signin", message: e.message } });
     if (e instanceof SigninError) return send(res, e.status, { error: { code: e.code, message: e.message } });
     if (e instanceof GatewayError) return send(res, e.status, { error: { code: e.code, message: e.message, ...e.extra } });
-    return send(res, 500, { error: { code: "internal", message: "gateway error" } });
+    console.error("[gateway] internal error:", e && e.message ? String(e.message).slice(0,200) : "unknown");
+    return send(res, 500, { error: { code: "internal", message: String(e && e.message ? e.message : "gateway error").slice(0, 200) } });
   };
 
   async function refreshModels() {
