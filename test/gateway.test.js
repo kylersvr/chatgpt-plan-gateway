@@ -15,8 +15,8 @@ const mkcfg = (fake, extra = {}) => ({ ...configFromEnv({ GATEWAY_DIR: tmp(), GA
 const signIn = async (cfg) => runLogin(cfg, { onUrl: (u) => { fetch(u).catch(() => {}); } }); // the pretend "browser" follows the redirect to the loopback callback
 const fast = { sleep: () => Promise.resolve(), baseDelayMs: 1 };
 
-test("sign-in: PKCE and state checked, id_token validated, file is owner-only, nothing secret printed", async () => {
-  const fake = await startFake(); const cfg = mkcfg(fake);
+test("sign-in: PKCE and state checked, id_token validated, POSIX file mode checked where supported", async (t) => {
+  const fake = await startFake(); t.after(() => fake.close()); const cfg = mkcfg(fake);
   const r = await signIn(cfg);
   assert.equal(r.subject, "user-123");
   const auth = fake.st.calls.find((c) => c.path === "/api/accounts/authorize");
@@ -27,12 +27,13 @@ test("sign-in: PKCE and state checked, id_token validated, file is owner-only, n
   assert.equal(auth.query.agent_name_hint, "Build OS");
   assert.equal(auth.query.resource, "https://api.openai.com/v1");
   assert.match(auth.query.redirect_uri, /^http:\/\/127\.0\.0\.1:\d+\/auth\/callback$/);
-  const mode = fs.statSync(cfg.credFile).mode & 0o777;
-  assert.equal(mode, 0o600);
+  await t.test("credential file POSIX mode is owner-only", { skip: process.platform === "win32" }, () => {
+    const mode = fs.statSync(cfg.credFile).mode & 0o777;
+    assert.equal(mode, 0o600);
+  });
   const creds = JSON.parse(fs.readFileSync(cfg.credFile, "utf8"));
   assert.ok(creds.refresh_token && creds.access_token);
   assert.equal(creds.id_token, undefined); // the id token is checked then dropped
-  await fake.close();
 });
 
 test("sign-in: a wrong state is refused and saves nothing", async () => {
@@ -199,10 +200,26 @@ test("a stalled stream is cut after the idle limit with a clear error", async ()
   await t.down();
 });
 
-test("body over 1 MB is refused", async () => {
+// Synthetic text and the fake OpenAI only: no real model call. The 8 MiB body limit is transport, not model context capacity.
+test("body limit is 8 MiB of actual bytes: the old 1 MB size now passes, the exact limit passes, one byte more is an explicit readable 413", async () => {
   const t = await up();
-  const r = await t.call("/v1/responses", { input: "a".repeat(1100 * 1024) }).catch((e) => ({ status: 0, err: e }));
-  assert.ok(r.status === 413 || r.status === 0);
+  const MAX = 8 * 1024 * 1024;
+  const raw = (s) => fetch("http://127.0.0.1:" + t.gw.server.address().port + "/v1/responses", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer s3cret" }, body: s });
+  assert.equal((await t.call("/v1/responses", { input: "a".repeat(1100 * 1024) })).status, 200);
+  const frame = (n) => '{"input":"' + "a".repeat(n) + '"}';
+  assert.equal(Buffer.byteLength(frame(MAX - 12)), MAX);
+  assert.equal((await raw(frame(MAX - 12))).status, 200);
+  const over = await raw(frame(MAX - 11));
+  assert.equal(over.status, 413);
+  assert.equal((await over.json()).error.code, "too_large");
+  // multi-byte text is counted in bytes, not characters: 3-byte characters pass 1/3 as many characters
+  const cjk = '{"input":"' + "日".repeat(Math.floor((MAX - 12) / 3) + 1) + '"}';
+  assert.equal((await raw(cjk)).status, 413);
+  // the gateway is still healthy afterwards, and invalid UTF-8 is an explicit 400
+  assert.equal((await t.call("/health")).status, 200);
+  const bad = await raw(new Uint8Array([0x7b, 0xff, 0x7d]));
+  assert.equal(bad.status, 400);
+  assert.equal((await bad.json()).error.code, "bad_utf8");
   await t.down();
 });
 

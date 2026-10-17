@@ -6,7 +6,9 @@ import { ModelPicker } from "./models.js";
 import { respond, GatewayError } from "./proxy.js";
 import { SigninManager, SigninError } from "./signin.js";
 
-const MAX_BODY = 1024 * 1024;
+// Whole HTTP request body, in actual UTF-8 bytes. Same number as the Jarvis agent's request limit (MAX_REQUEST_BYTES in the Bridge
+// repo's capacity.js; a drift test there compares them). This is a transport limit only, not model context capacity.
+const MAX_BODY = 8 * 1024 * 1024;
 const sha = (s) => crypto.createHash("sha256").update(String(s)).digest();
 
 export function createGateway(cfg, { fetchFn = fetch, now, sleep } = {}) {
@@ -19,10 +21,17 @@ export function createGateway(cfg, { fetchFn = fetch, now, sleep } = {}) {
 
   const send = (res, status, obj) => { const b = JSON.stringify(obj); res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(b); };
   const authed = (req) => !cfg.secret || crypto.timingSafeEqual(sha(req.headers.authorization || ""), sha("Bearer " + cfg.secret));
+  // Bounded read: once the body passes MAX_BODY actual bytes nothing more is kept (the rest is drained and dropped), and the
+  // explicit 413 is sent after the upload ends, so the caller can read the error instead of seeing a reset connection.
   const readBody = (req) => new Promise((resolve, reject) => {
-    let n = 0; const parts = [];
-    req.on("data", (c) => { n += c.length; if (n > MAX_BODY) { reject(new GatewayError(413, "too_large", "body over 1 MB")); req.destroy(); } else parts.push(c); });
-    req.on("end", () => { try { resolve(JSON.parse(Buffer.concat(parts).toString() || "{}")); } catch { reject(new GatewayError(400, "bad_json", "body is not JSON")); } });
+    let n = 0, over = false; const parts = [];
+    req.on("data", (c) => { if (over) return; n += c.length; if (n > MAX_BODY) { over = true; parts.length = 0; } else parts.push(c); });
+    req.on("end", () => {
+      if (over) return reject(new GatewayError(413, "too_large", "body over " + MAX_BODY + " bytes (UTF-8); nothing was processed"));
+      let raw;
+      try { raw = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(parts)); } catch { return reject(new GatewayError(400, "bad_utf8", "body is not valid UTF-8")); }
+      try { resolve(JSON.parse(raw || "{}")); } catch { reject(new GatewayError(400, "bad_json", "body is not JSON")); }
+    });
     req.on("error", reject);
   });
   const fail = (res, e) => {
