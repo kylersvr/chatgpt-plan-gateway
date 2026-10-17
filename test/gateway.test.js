@@ -200,6 +200,30 @@ test("a stalled stream is cut after the idle limit with a clear error", async ()
   await t.down();
 });
 
+test("incomplete upstream output is never an accepted answer: EOF without terminal, response.incomplete, completed event with status incomplete, streamed error; no retry", async () => {
+  const cases = [["eof_no_terminal", 502, "upstream_http_502"], ["incomplete_event", 502, "upstream_incomplete"], ["completed_event_incomplete_status", 502, "upstream_incomplete"], ["stream_error", 502, "upstream_failed"]];
+  for (const [mode, status, code] of cases) {
+    const t = await up({}, { responsesMode: mode });
+    const r = await t.call("/v1/responses", { input: "x" }); const j = await r.json();
+    assert.equal(r.status, status, mode); assert.equal(j.error.code, code, mode);
+    assert.equal(j.output_text, undefined, mode);                                                   // no partial text handed out
+    assert.equal(t.fake.st.calls.filter((c) => c.path === "/v1/responses").length, 1, mode + ": exactly one upstream call, no automatic retry");
+    await t.down();
+  }
+  const t2 = await up({}, { responsesMode: "incomplete_event" });
+  assert.match((await (await t2.call("/v1/responses", { input: "x" })).json()).error.message, /max_output_tokens/);
+  await t2.down();
+});
+
+test("a genuine completed event keeps working: explicit status completed, and a legacy completed event with no status field", async () => {
+  for (const mode of ["ok", "completed_no_status"]) {
+    const t = await up({}, { responsesMode: mode });
+    const r = await t.call("/v1/responses", { input: "x" }); const j = await r.json();
+    assert.equal(r.status, 200, mode); assert.equal(j.status, "completed"); assert.equal(j.output_text, "Hello world");
+    await t.down();
+  }
+});
+
 // Synthetic text and the fake OpenAI only: no real model call. The 8 MiB body limit is transport, not model context capacity.
 test("body limit is 8 MiB of actual bytes: the old 1 MB size now passes, the exact limit passes, one byte more is an explicit readable 413", async () => {
   const t = await up();

@@ -79,7 +79,13 @@ export async function startFake(opts = {}) {
       ev({ type: "response.created", response: { id: "resp_1" } });
       ev({ type: "response.output_text.delta", delta: "Hello " });
       ev({ type: "response.output_text.delta", delta: "world" });
-      ev({ type: "response.completed", response: { id: "resp_1", model: body.model, output: [{ type: "message", content: [{ type: "output_text", text: "Hello world" }] }], usage: { input_tokens: 5, output_tokens: 2 } } });
+      // Incomplete-output modes: some text streamed, then no genuine completion.
+      if (st.responsesMode === "eof_no_terminal") return res.end();
+      if (st.responsesMode === "incomplete_event") { ev({ type: "response.incomplete", response: { id: "resp_1", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [{ type: "message", content: [{ type: "output_text", text: "Hello " }] }] } }); return res.end(); }
+      if (st.responsesMode === "completed_event_incomplete_status") { ev({ type: "response.completed", response: { id: "resp_1", model: body.model, status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [{ type: "message", content: [{ type: "output_text", text: "Hello " }] }] } }); return res.end(); }
+      if (st.responsesMode === "completed_no_status") { ev({ type: "response.completed", response: { id: "resp_1", model: body.model, output: [{ type: "message", content: [{ type: "output_text", text: "Hello world" }] }] } }); return res.end(); }
+      if (st.responsesMode === "stream_error") { ev({ type: "error", error: { code: "server_error", message: "stream broke" } }); return res.end(); }
+      ev({ type: "response.completed", response: { id: "resp_1", model: body.model, status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "Hello world" }] }], usage: { input_tokens: 5, output_tokens: 2 } } });
       return res.end();
     }
     json(res, 404, { error: "nope" });

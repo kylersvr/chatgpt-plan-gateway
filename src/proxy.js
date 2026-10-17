@@ -82,14 +82,21 @@ async function callOnce(ctx, token, payload) {
     throw new GatewayError(502, "upstream_unreachable", "could not reach OpenAI: " + (e.cause?.code || e.message));
   } finally { clearTimeout(timer); }
   if (!res.ok) { const t = await res.text().catch(() => ""); return { http: res.status, text: t }; }
-  let completed = null, failed = null, streamed = "";
+  let completed = null, failed = null, incomplete = null, streamed = "";
   await readSse(res, ctx.cfg.idleTimeoutMs, (ev) => {
     if (ev.type === "response.output_text.delta" && typeof ev.delta === "string") streamed += ev.delta;
-    if (ev.type === "response.completed") { completed = ev.response || {}; return "stop"; }
+    if (ev.type === "response.completed") {
+      const r = ev.response || {};
+      // An EXPLICIT status other than "completed" is not a finished answer. A missing status inside a genuine completed event stays accepted (legacy shape).
+      if (r.status !== undefined && r.status !== "completed") { incomplete = { status: String(r.status), reason: r.incomplete_details && r.incomplete_details.reason }; return "stop"; }
+      completed = r; return "stop";
+    }
+    if (ev.type === "response.incomplete") { const r = ev.response || {}; incomplete = { status: String(r.status || "incomplete"), reason: r.incomplete_details && r.incomplete_details.reason }; return "stop"; }
     if (ev.type === "response.failed") { failed = (ev.response && ev.response.error) || ev.error || { code: "unknown" }; return "stop"; }
     if (ev.type === "error") { failed = ev.error || ev; return "stop"; }
   });
   if (failed) return { failed };
+  if (incomplete) return { incomplete };
   if (!completed) return { http: 502, text: "stream ended before response.completed" };
   return { completed, streamed };
 }
@@ -107,6 +114,11 @@ export async function respond(ctx, body) {
     const r = await callOnce(ctx, token, payload);
     if (r.completed) {
       return { status: 200, json: { id: r.completed.id || null, model: r.completed.model || model, status: "completed", output_text: textOf(r.completed) || r.streamed, usage: r.completed.usage || null, gateway: notes } };
+    }
+    if (r.incomplete) {
+      // Partial output is never returned as an answer and never retried automatically (a retry would spend again).
+      const why = r.incomplete.reason ? " (" + String(r.incomplete.reason).slice(0, 60) + ")" : "";
+      throw new GatewayError(502, "upstream_incomplete", "OpenAI ended the response as " + r.incomplete.status + why + "; no answer was accepted and it was not retried", { upstream_status: r.incomplete.status, gateway: notes });
     }
     if (r.failed) {
       const code = String(r.failed.code || r.failed.type || "");
