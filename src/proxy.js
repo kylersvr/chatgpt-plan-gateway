@@ -72,7 +72,55 @@ async function readSse(res, idleMs, onEvent) {
 }
 
 const textOf = (resp) => (resp.output || []).flatMap((o) => (o.content || []).filter((c) => c.type === "output_text").map((c) => c.text)).join("");
-const isParamReject = (status, text, word) => status === 400 && new RegExp(word, "i").test(text);
+// Evidence for the narrow finalized-stream fallback. Anything malformed or conflicting sets `bad`, which makes the fallback unavailable.
+const isIdx = (n) => Number.isInteger(n) && n >= 0;
+const isId = (s) => typeof s === "string" && s.length > 0;
+function newProof() { return { bad: false, items: new Map(), deltas: new Map(), dones: new Map() }; }
+function proofPart(p, map, ev, field) {
+  if (!isIdx(ev.output_index) || !isIdx(ev.content_index) || !isId(ev.item_id) || typeof ev[field] !== "string") { p.bad = true; return; }
+  const k = ev.output_index + ":" + ev.content_index;
+  const cur = map.get(k);
+  if (!cur) { map.set(k, { itemId: ev.item_id, text: ev[field] }); return; }
+  if (cur.itemId !== ev.item_id) { p.bad = true; return; }
+  if (map === p.deltas) cur.text += ev[field]; else if (cur.text !== ev[field]) p.bad = true;
+}
+function proofItem(p, ev) {
+  const it = ev.item;
+  if (!it || typeof it !== "object" || it.type !== "message") return; // only assistant messages count as answer evidence
+  if (it.role !== "assistant" || it.status !== "completed" || !isId(it.id) || !isIdx(ev.output_index) || !Array.isArray(it.content)) { p.bad = true; return; }
+  const parts = [];
+  for (const c of it.content) {
+    if (!c || c.type !== "output_text" || typeof c.text !== "string") { p.bad = true; return; }
+    parts.push(c.text);
+  }
+  const cur = p.items.get(ev.output_index);
+  if (!cur) { p.items.set(ev.output_index, { id: it.id, parts }); return; }
+  if (cur.id !== it.id || cur.parts.length !== parts.length || cur.parts.some((t, i) => t !== parts[i])) p.bad = true;
+}
+// Returns the reconstructed text, or null when the stream does not fully prove it.
+function provenText(p) {
+  if (p.bad || !p.items.size) return null;
+  const ids = new Set();
+  for (const it of p.items.values()) { if (ids.has(it.id)) return null; ids.add(it.id); }
+  const used = new Set();
+  let text = "";
+  for (const oi of [...p.items.keys()].sort((a, b) => a - b)) {
+    const it = p.items.get(oi);
+    for (let ci = 0; ci < it.parts.length; ci++) {
+      const k = oi + ":" + ci;
+      const d = p.dones.get(k);
+      if (!d || d.itemId !== it.id || d.text !== it.parts[ci]) return null;
+      const dl = p.deltas.get(k);
+      if (dl && (dl.itemId !== it.id || dl.text !== it.parts[ci])) return null;
+      used.add(k);
+      text += it.parts[ci];
+    }
+  }
+  for (const k of p.deltas.keys()) if (!used.has(k)) return null;
+  for (const k of p.dones.keys()) if (!used.has(k)) return null;
+  return text.trim() ? text : null;
+}
+const isParamReject =(status, text, word) => status === 400 && new RegExp(word, "i").test(text);
 
 async function callOnce(ctx, token, payload) {
   // No answer-time limit: only silence (no headers, no body bytes) for idleTimeoutMs aborts the call.
@@ -93,12 +141,13 @@ async function callOnce(ctx, token, payload) {
     throw new GatewayError(502, "upstream_unreachable", "could not reach OpenAI: " + (e.cause?.code || e.message));
   } finally { clearTimeout(timer); }
   if (!res.ok) { const t = await res.text().catch(() => ""); return { http: res.status, text: t }; }
-  let completed = null, failed = null, incomplete = null, streamed = "";
+  let completed = null, failed = null, incomplete = null, streamed = "", completedExplicit = false;
   const shape = { d: 0, td: 0, ic: 0, it: 0 };
+  const proof = newProof();
   await readSse(res, ctx.cfg.idleTimeoutMs, (ev) => {
-    if (ev.type === "response.output_text.delta" && typeof ev.delta === "string") { streamed += ev.delta; shape.d += ev.delta.length; }
-    if (ev.type === "response.output_text.done" && typeof ev.text === "string") shape.td += ev.text.length;
-    if (ev.type === "response.output_item.done") { shape.ic++; if (ev.item && Array.isArray(ev.item.content)) for (const c of ev.item.content) if (c && c.type === "output_text" && typeof c.text === "string") shape.it += c.text.length; }
+    if (ev.type === "response.output_text.delta") { if (typeof ev.delta === "string") { streamed += ev.delta; shape.d += ev.delta.length; } proofPart(proof, proof.deltas, ev, "delta"); }
+    if (ev.type === "response.output_text.done") { if (typeof ev.text === "string") shape.td += ev.text.length; proofPart(proof, proof.dones, ev, "text"); }
+    if (ev.type === "response.output_item.done") { shape.ic++; proofItem(proof, ev); if (ev.item && Array.isArray(ev.item.content)) for (const c of ev.item.content) if (c && c.type === "output_text" && typeof c.text === "string") shape.it += c.text.length; }
     if (ev.type === "response.completed") {
       const r = ev.response;
       if (!r || typeof r !== "object" || Array.isArray(r) || typeof r.id !== "string" || !r.id || typeof r.model !== "string" || !r.model || !Array.isArray(r.output)) throw new GatewayError(502, "upstream_corrupt_stream", "OpenAI completion payload is missing or malformed; no answer was accepted or retried");
@@ -108,7 +157,7 @@ async function callOnce(ctx, token, payload) {
       }
       // An EXPLICIT status other than "completed" is not a finished answer. A missing status inside a genuine completed event stays accepted (legacy shape).
       if (r.status !== undefined && r.status !== "completed") { incomplete = { status: String(r.status), reason: r.incomplete_details && r.incomplete_details.reason }; return "stop"; }
-      completed = r; return "stop";
+      completed = r; completedExplicit = r.status === "completed"; return "stop";
     }
     if (ev.type === "response.incomplete") { const r = ev.response || {}; incomplete = { status: String(r.status || "incomplete"), reason: r.incomplete_details && r.incomplete_details.reason }; return "stop"; }
     if (ev.type === "response.failed") { failed = (ev.response && ev.response.error) || ev.error || { code: "unknown" }; return "stop"; }
@@ -117,7 +166,8 @@ async function callOnce(ctx, token, payload) {
   if (failed) return { failed };
   if (incomplete) return { incomplete };
   if (!completed) return { http: 502, text: "stream ended before response.completed" };
-  return { completed, streamed, shape };
+  const finalized = completedExplicit && completed.output.length === 0 ? provenText(proof) : null;
+  return { completed, streamed, shape, finalized };
 }
 
 export async function respond(ctx, body) {
@@ -132,12 +182,15 @@ export async function respond(ctx, body) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const r = await callOnce(ctx, token, payload);
     if (r.completed) {
-      const text = textOf(r.completed);
+      let text = textOf(r.completed);
+      notes.response_text_source = "completed_output";
+      if (!text.trim() && r.finalized) { text = r.finalized; notes.response_text_source = "finalized_stream_items"; }
       if (!text.trim()) {
+        delete notes.response_text_source;
         const shape = { ...r.shape, oi: r.completed.output.length, ot: text.length, tt: typeof r.completed.output_text === "string" ? r.completed.output_text.length : 0 };
         throw new GatewayError(502, "upstream_empty_text", "Completed response has no terminal text; shape=" + JSON.stringify(shape) + "; no answer accepted or retried");
       }
-      return { status: 200, json: { id: r.completed.id || null, model: r.completed.model || model, status: "completed", output_text: textOf(r.completed), usage: r.completed.usage || null, gateway: notes } };
+      return { status: 200, json: { id: r.completed.id || null, model: r.completed.model || model, status: "completed", output_text: text, usage: r.completed.usage || null, gateway: notes } };
     }
     if (r.incomplete) {
       // Partial output is never returned as an answer and never retried automatically (a retry would spend again).
