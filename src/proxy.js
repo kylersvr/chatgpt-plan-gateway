@@ -94,8 +94,11 @@ async function callOnce(ctx, token, payload) {
   } finally { clearTimeout(timer); }
   if (!res.ok) { const t = await res.text().catch(() => ""); return { http: res.status, text: t }; }
   let completed = null, failed = null, incomplete = null, streamed = "";
+  const shape = { d: 0, td: 0, ic: 0, it: 0 };
   await readSse(res, ctx.cfg.idleTimeoutMs, (ev) => {
-    if (ev.type === "response.output_text.delta" && typeof ev.delta === "string") streamed += ev.delta;
+    if (ev.type === "response.output_text.delta" && typeof ev.delta === "string") { streamed += ev.delta; shape.d += ev.delta.length; }
+    if (ev.type === "response.output_text.done" && typeof ev.text === "string") shape.td += ev.text.length;
+    if (ev.type === "response.output_item.done") { shape.ic++; if (ev.item && Array.isArray(ev.item.content)) for (const c of ev.item.content) if (c && c.type === "output_text" && typeof c.text === "string") shape.it += c.text.length; }
     if (ev.type === "response.completed") {
       const r = ev.response;
       if (!r || typeof r !== "object" || Array.isArray(r) || typeof r.id !== "string" || !r.id || typeof r.model !== "string" || !r.model || !Array.isArray(r.output)) throw new GatewayError(502, "upstream_corrupt_stream", "OpenAI completion payload is missing or malformed; no answer was accepted or retried");
@@ -114,7 +117,7 @@ async function callOnce(ctx, token, payload) {
   if (failed) return { failed };
   if (incomplete) return { incomplete };
   if (!completed) return { http: 502, text: "stream ended before response.completed" };
-  return { completed, streamed };
+  return { completed, streamed, shape };
 }
 
 export async function respond(ctx, body) {
@@ -129,6 +132,11 @@ export async function respond(ctx, body) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const r = await callOnce(ctx, token, payload);
     if (r.completed) {
+      const text = textOf(r.completed);
+      if (!text.trim()) {
+        const shape = { ...r.shape, oi: r.completed.output.length, ot: text.length, tt: typeof r.completed.output_text === "string" ? r.completed.output_text.length : 0 };
+        throw new GatewayError(502, "upstream_empty_text", "Completed response has no terminal text; shape=" + JSON.stringify(shape) + "; no answer accepted or retried");
+      }
       return { status: 200, json: { id: r.completed.id || null, model: r.completed.model || model, status: "completed", output_text: textOf(r.completed), usage: r.completed.usage || null, gateway: notes } };
     }
     if (r.incomplete) {

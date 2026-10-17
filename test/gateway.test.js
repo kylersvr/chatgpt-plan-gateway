@@ -300,7 +300,7 @@ test("corrupt UTF-8/JSON and malformed completed payloads fail without retry; de
   }
   for (const mode of ["unterminated_final","empty_final_output"]) {
     const t=await up({}, {responsesMode:mode});
-    try { const r=await t.call("/v1/responses",{input:"x"}); const j=await r.json(); assert.equal(r.status,200); assert.equal(j.output_text,mode==="empty_final_output"?"":"Hello world"); }
+    try { const r=await t.call("/v1/responses",{input:"x"}); const j=await r.json(); if (mode === "empty_final_output") { assert.equal(r.status,502); assert.equal(j.error.code,"upstream_empty_text"); } else { assert.equal(r.status,200); assert.equal(j.output_text,"Hello world"); } }
     finally { await t.down(); }
   }
 });
