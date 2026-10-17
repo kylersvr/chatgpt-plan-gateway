@@ -40,24 +40,35 @@ function sanitize(body, cfg, model, topId = null) {
 
 async function readSse(res, idleMs, onEvent) {
   const reader = res.body.getReader();
-  const dec = new TextDecoder();
+  const dec = new TextDecoder('utf-8', { fatal: true });
   let buf = "";
-  for (;;) {
-    const chunk = await Promise.race([
-      reader.read(),
-      new Promise((_, rej) => setTimeout(() => rej(new GatewayError(504, "upstream_stalled", "no data from OpenAI for " + Math.round(idleMs / 1000) + "s")), idleMs).unref?.()),
-    ]);
-    if (chunk.done) break;
-    buf += dec.decode(chunk.value, { stream: true });
-    let i;
-    while ((i = buf.indexOf("\n\n")) >= 0) {
-      const raw = buf.slice(0, i); buf = buf.slice(i + 2);
-      const data = raw.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
-      if (!data || data === "[DONE]") continue;
-      let ev; try { ev = JSON.parse(data); } catch { continue; }
-      if (onEvent(ev) === "stop") { try { await reader.cancel(); } catch { /* ignore */ } return; }
+  const bad = (message) => new GatewayError(502, "upstream_corrupt_stream", message + "; no answer was accepted or retried");
+  const frame = (raw) => {
+    const data = raw.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
+    if (!data || data === "[DONE]") return false;
+    let ev; try { ev = JSON.parse(data); } catch { throw bad("OpenAI sent malformed event JSON"); }
+    if (!ev || typeof ev !== 'object' || Array.isArray(ev)) throw bad("OpenAI sent an invalid event");
+    return onEvent(ev) === "stop";
+  };
+  try {
+    for (;;) {
+      let timer;
+      let chunk;
+      try { chunk = await Promise.race([reader.read(), new Promise((_, rej) => { timer = setTimeout(() => rej(new GatewayError(504, "upstream_stalled", "no data from OpenAI for " + Math.round(idleMs / 1000) + "s")), idleMs); timer.unref?.(); })]); }
+      finally { clearTimeout(timer); }
+      if (chunk.done) {
+        try { buf += dec.decode(); } catch { throw bad("OpenAI sent invalid UTF-8"); }
+        if (buf) frame(buf);
+        return;
+      }
+      try { buf += dec.decode(chunk.value, { stream: true }); } catch { throw bad("OpenAI sent invalid UTF-8"); }
+      for (;;) {
+        const m = /\r?\n\r?\n/.exec(buf); if (!m) break;
+        const raw = buf.slice(0, m.index); buf = buf.slice(m.index + m[0].length);
+        if (frame(raw)) return;
+      }
     }
-  }
+  } finally { try { await reader.cancel(); } catch {} }
 }
 
 const textOf = (resp) => (resp.output || []).flatMap((o) => (o.content || []).filter((c) => c.type === "output_text").map((c) => c.text)).join("");
@@ -86,7 +97,12 @@ async function callOnce(ctx, token, payload) {
   await readSse(res, ctx.cfg.idleTimeoutMs, (ev) => {
     if (ev.type === "response.output_text.delta" && typeof ev.delta === "string") streamed += ev.delta;
     if (ev.type === "response.completed") {
-      const r = ev.response || {};
+      const r = ev.response;
+      if (!r || typeof r !== "object" || Array.isArray(r) || typeof r.id !== "string" || !r.id || typeof r.model !== "string" || !r.model || !Array.isArray(r.output)) throw new GatewayError(502, "upstream_corrupt_stream", "OpenAI completion payload is missing or malformed; no answer was accepted or retried");
+      for (const o of r.output) {
+        if (!o || typeof o !== "object" || (o.content !== undefined && !Array.isArray(o.content))) throw new GatewayError(502, "upstream_corrupt_stream", "OpenAI completion output is malformed");
+        for (const c of o.content || []) if (!c || typeof c !== "object" || (c.type === "output_text" && typeof c.text !== "string")) throw new GatewayError(502, "upstream_corrupt_stream", "OpenAI completion text is malformed");
+      }
       // An EXPLICIT status other than "completed" is not a finished answer. A missing status inside a genuine completed event stays accepted (legacy shape).
       if (r.status !== undefined && r.status !== "completed") { incomplete = { status: String(r.status), reason: r.incomplete_details && r.incomplete_details.reason }; return "stop"; }
       completed = r; return "stop";
@@ -113,7 +129,7 @@ export async function respond(ctx, body) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const r = await callOnce(ctx, token, payload);
     if (r.completed) {
-      return { status: 200, json: { id: r.completed.id || null, model: r.completed.model || model, status: "completed", output_text: textOf(r.completed) || r.streamed, usage: r.completed.usage || null, gateway: notes } };
+      return { status: 200, json: { id: r.completed.id || null, model: r.completed.model || model, status: "completed", output_text: textOf(r.completed), usage: r.completed.usage || null, gateway: notes } };
     }
     if (r.incomplete) {
       // Partial output is never returned as an answer and never retried automatically (a retry would spend again).

@@ -79,6 +79,13 @@ export async function startFake(opts = {}) {
       ev({ type: "response.created", response: { id: "resp_1" } });
       ev({ type: "response.output_text.delta", delta: "Hello " });
       ev({ type: "response.output_text.delta", delta: "world" });
+      if (st.responsesMode === "malformed_json") res.write('data: {broken\n\n');
+      if (st.responsesMode === "bad_utf8") res.write(Buffer.from([0xff,0xfe]));
+      if (st.responsesMode === "truncated_utf8") { res.write(Buffer.from([0xe2,0x82])); return res.end(); }
+      if (st.responsesMode === "missing_response") { ev({type:"response.completed"}); return res.end(); }
+      if (st.responsesMode === "empty_response") { ev({type:"response.completed",response:{}}); return res.end(); }
+      if (st.responsesMode === "empty_final_output") { ev({type:"response.completed",response:{id:"r",model:body.model,status:"completed",output:[]}}); return res.end(); }
+      if (st.responsesMode === "unterminated_final") { res.write('data: '+JSON.stringify({type:"response.completed",response:{id:"r",model:body.model,status:"completed",output:[{type:"message",content:[{type:"output_text",text:"Hello world"}]}]}})); return res.end(); }
       // Incomplete-output modes: some text streamed, then no genuine completion.
       if (st.responsesMode === "eof_no_terminal") return res.end();
       if (st.responsesMode === "incomplete_event") { ev({ type: "response.incomplete", response: { id: "resp_1", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [{ type: "message", content: [{ type: "output_text", text: "Hello " }] }] } }); return res.end(); }

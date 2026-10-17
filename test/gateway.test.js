@@ -291,3 +291,16 @@ test("headless sign-in: wrong address and finishing without starting are refused
   assert.equal((await call("/admin/signin/start", {})).status, 200);
   await gw.stop(); await fake.close();
 });
+
+test("corrupt UTF-8/JSON and malformed completed payloads fail without retry; decoder flush and final unterminated frame are handled", async () => {
+  for (const mode of ["malformed_json","bad_utf8","truncated_utf8","missing_response","empty_response"]) {
+    const t=await up({}, {responsesMode:mode});
+    try { const r=await t.call("/v1/responses",{input:"x"}); const j=await r.json(); assert.equal(r.status,502,mode); assert.equal(j.error.code,"upstream_corrupt_stream",mode); assert.equal(j.output_text,undefined); assert.equal(t.fake.st.calls.filter(c=>c.path==="/v1/responses").length,1); }
+    finally { await t.down(); }
+  }
+  for (const mode of ["unterminated_final","empty_final_output"]) {
+    const t=await up({}, {responsesMode:mode});
+    try { const r=await t.call("/v1/responses",{input:"x"}); const j=await r.json(); assert.equal(r.status,200); assert.equal(j.output_text,mode==="empty_final_output"?"":"Hello world"); }
+    finally { await t.down(); }
+  }
+});
